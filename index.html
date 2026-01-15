@@ -8,9 +8,9 @@
     <!-- Tailwind CSS for rapid UI styling -->
     <script src="https://cdn.tailwindcss.com"></script>
     
-    <!-- TensorFlow.js and Coco-SSD -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+    <!-- TensorFlow.js and Coco-SSD (Updated Versions) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 
     <style>
         body {
@@ -103,6 +103,7 @@
         <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
         <h2 class="text-xl font-bold">Initializing Physics Engine...</h2>
         <p class="text-gray-400 text-sm mt-2" id="status-text">Requesting Camera Access...</p>
+        <p class="text-red-400 text-xs mt-4 hidden" id="error-help">If this takes too long, check your internet connection.</p>
     </div>
 
     <!-- Main Viewport -->
@@ -339,11 +340,30 @@ async function init() {
         // 1. Setup Camera
         await setupCamera();
         
-        // 2. Load AI
-        state.status.innerText = "Loading Coco-SSD Model...";
-        state.model = await cocoSsd.load();
+        // 2. Prepare TensorFlow Backend
+        state.status.innerText = "Initializing AI Backend...";
+        await tf.ready();
         
-        // 3. Start Loop
+        // Optional: Try to force WebGL, fallback automatically if needed
+        try {
+            await tf.setBackend('webgl');
+        } catch(e) {
+            console.warn("WebGL failed, falling back to CPU", e);
+        }
+
+        // 3. Load AI with Timeout and Lite model
+        state.status.innerText = "Loading Lite Model...";
+        document.getElementById('error-help').classList.remove('hidden');
+
+        // Create a race between the loader and a timeout
+        const modelPromise = cocoSsd.load({ base: 'lite_mobilenet_v2' });
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error("Model load timed out. Check connection.")), 20000)
+        );
+
+        state.model = await Promise.race([modelPromise, timeoutPromise]);
+        
+        // 4. Start Loop
         state.loader.classList.add('hidden');
         state.isStreamReady = true;
         resizeCanvas();
@@ -352,6 +372,7 @@ async function init() {
     } catch (err) {
         state.status.innerText = `Error: ${err.message}`;
         state.status.classList.add('text-red-500');
+        document.querySelector('.animate-spin').classList.remove('animate-spin'); // Stop spinner
         console.error(err);
     }
 }
