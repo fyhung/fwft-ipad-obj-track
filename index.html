@@ -54,6 +54,8 @@
             align-items: center;
             justify-content: center;
             z-index: 50;
+            padding: 20px;
+            text-align: center;
         }
 
         /* Floating UI Panel */
@@ -103,7 +105,12 @@
         <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
         <h2 class="text-xl font-bold">Initializing Physics Engine...</h2>
         <p class="text-gray-400 text-sm mt-2" id="status-text">Requesting Camera Access...</p>
-        <p class="text-red-400 text-xs mt-4 hidden" id="error-help">If this takes too long, check your internet connection.</p>
+        <p class="text-red-400 text-xs mt-4 hidden" id="error-help">This is taking longer than usual. Please wait...</p>
+        
+        <!-- Retry Button (Hidden by default) -->
+        <button id="retry-btn" class="hidden mt-6 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-full transition-colors">
+            ↻ Retry Connection
+        </button>
     </div>
 
     <!-- Main Viewport -->
@@ -335,30 +342,45 @@ class TrackedObject {
 /**
  * INITIALIZATION
  */
-async function init() {
+async function init(forceCpu = false) {
     try {
+        // Reset UI state for retry
+        state.loader.querySelector('.animate-spin').classList.remove('hidden');
+        document.getElementById('retry-btn').classList.add('hidden');
+        state.status.classList.remove('text-red-500');
+        
         // 1. Setup Camera
-        await setupCamera();
+        if (!state.video.srcObject) {
+            await setupCamera();
+        }
         
         // 2. Prepare TensorFlow Backend
-        state.status.innerText = "Initializing AI Backend...";
+        state.status.innerText = "Starting AI Engine...";
         await tf.ready();
         
-        // Optional: Try to force WebGL, fallback automatically if needed
-        try {
-            await tf.setBackend('webgl');
-        } catch(e) {
-            console.warn("WebGL failed, falling back to CPU", e);
+        if (forceCpu) {
+            console.log("Forcing CPU backend...");
+            await tf.setBackend('cpu');
+            state.status.innerText = "Mode: CPU (Safe Mode)...";
+        } else {
+            // Try WebGL, fallback to CPU automatically if it fails
+            try {
+                await tf.setBackend('webgl');
+                state.status.innerText = "Mode: WebGL Acceleration...";
+            } catch(e) {
+                console.warn("WebGL failed, falling back to CPU", e);
+                await tf.setBackend('cpu');
+            }
         }
 
-        // 3. Load AI with Timeout and Lite model
-        state.status.innerText = "Loading Lite Model...";
+        // 3. Load AI with Timeout
+        state.status.innerText = "Downloading Model (may take 60s)...";
         document.getElementById('error-help').classList.remove('hidden');
 
-        // Create a race between the loader and a timeout
+        // Extended timeout to 60 seconds
         const modelPromise = cocoSsd.load({ base: 'lite_mobilenet_v2' });
         const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error("Model load timed out. Check connection.")), 20000)
+            setTimeout(() => reject(new Error("Connection timed out. Click Retry.")), 60000)
         );
 
         state.model = await Promise.race([modelPromise, timeoutPromise]);
@@ -372,10 +394,19 @@ async function init() {
     } catch (err) {
         state.status.innerText = `Error: ${err.message}`;
         state.status.classList.add('text-red-500');
-        document.querySelector('.animate-spin').classList.remove('animate-spin'); // Stop spinner
+        document.querySelector('.animate-spin').classList.add('hidden'); // Stop spinner
+        document.getElementById('retry-btn').classList.remove('hidden'); // Show retry
         console.error(err);
     }
 }
+
+// Retry Button Listener
+document.getElementById('retry-btn').addEventListener('click', () => {
+    // When retrying, force CPU mode if the first attempt might have been a WebGL hang,
+    // or just try again. For now, we just try again cleanly.
+    state.status.innerText = "Retrying...";
+    init(false); 
+});
 
 async function setupCamera() {
     const stream = await navigator.mediaDevices.getUserMedia({
