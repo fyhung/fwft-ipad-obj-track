@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI Hand Fruit Slicer</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- AI Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection"></script>
+
+    <style>
+        body {
+            background-color: #111;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            touch-action: none;
+            user-select: none;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        video {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirror the video */
+            filter: brightness(0.7); /* Darken video slightly to make game pop */
+        }
+        
+        canvas {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            transform: none; /* AI coordinates will be pre-flipped */
+        }
+
+        /* UI Overlay */
+        #ui-layer {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+        }
+
+        /* HUD */
+        .hud-item {
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+        }
+
+        /* Screens */
+        .screen {
+            position: absolute;
+            inset: 0;
+            background: rgba(0,0,0,0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+            backdrop-filter: blur(5px);
+            pointer-events: auto;
+        }
+
+        .hidden { display: none !important; }
+
+        .btn {
+            background: linear-gradient(135deg, #ff5f6d, #ffc371);
+            border: none;
+            padding: 15px 40px;
+            font-size: 24px;
+            font-weight: bold;
+            color: white;
+            border-radius: 50px;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(255, 95, 109, 0.5);
+            transition: transform 0.1s;
+            margin-top: 20px;
+        }
+        .btn:active { transform: scale(0.95); }
+
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <video id="video" playsinline muted autoplay></video>
+        <canvas id="canvas"></canvas>
+        
+        <!-- HUD -->
+        <div id="ui-layer">
+            <div class="flex justify-between w-full">
+                <div class="hud-item text-4xl font-bold text-yellow-400">
+                    <span id="score">0</span>
+                </div>
+                <div class="hud-item text-3xl font-bold text-red-500">
+                    <span id="lives">❤️❤️❤️</span>
+                </div>
+            </div>
+            <div class="text-center text-gray-400 text-xs mb-2">
+                Use your Index Finger to slice!
+            </div>
+        </div>
+
+        <!-- Loading Screen -->
+        <div id="loading-screen" class="screen">
+            <div class="animate-spin rounded-full h-16 w-16 border-b-4 border-yellow-500 mb-6"></div>
+            <h1 class="text-3xl font-bold text-white mb-2">Loading AI Blade...</h1>
+            <p class="text-gray-400">Please allow camera access</p>
+        </div>
+
+        <!-- Start Screen -->
+        <div id="start-screen" class="screen hidden">
+            <h1 class="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-red-500 mb-4">
+                FRUIT SLICER
+            </h1>
+            <p class="text-xl text-gray-300 mb-8">Wave your finger to slice fruits. Avoid bombs!</p>
+            <button class="btn" onclick="startGame()">START GAME</button>
+        </div>
+
+        <!-- Game Over Screen -->
+        <div id="game-over-screen" class="screen hidden">
+            <h1 class="text-5xl font-bold text-red-500 mb-4">GAME OVER</h1>
+            <p class="text-2xl text-white mb-6">Score: <span id="final-score">0</span></p>
+            <button class="btn" onclick="startGame()">PLAY AGAIN</button>
+        </div>
+    </div>
+
+<script>
+/**
+ * GAME CONFIGURATION
+ */
+const CONFIG = {
+    MAX_LIVES: 3,
+    GRAVITY: 0.15,
+    SPAWN_RATE: 60, // Frames between spawns
+    TRAIL_LENGTH: 15, // History length for swoosh
+    BLADE_COLOR: '#00ffff',
+    BOMB_PROBABILITY: 0.15,
+    Y_OFFSET: -15 // Shift detection upward (negative Y)
+};
+
+// Fruit Types
+const FRUITS = [
+    { emoji: '🍎', color: '#ff0000', size: 40, score: 10 },
+    { emoji: '🍊', color: '#ffa500', size: 35, score: 15 },
+    { emoji: '🍉', color: '#00ff00', size: 45, score: 10 },
+    { emoji: '🥝', color: '#a0e040', size: 30, score: 20 },
+    { emoji: '🍌', color: '#ffff00', size: 40, score: 15 },
+    { emoji: '🥥', color: '#ffffff', size: 35, score: 20 }
+];
+
+/**
+ * GAME STATE
+ */
+const state = {
+    video: document.getElementById('video'),
+    canvas: document.getElementById('canvas'),
+    ctx: document.getElementById('canvas').getContext('2d'),
+    detector: null,
+    isModelReady: false,
+    
+    // Game Vars
+    isActive: false,
+    score: 0,
+    lives: 3,
+    frames: 0,
+    flashIntensity: 0.0, // For bomb flash
+    
+    // Entities
+    objects: [], // Fruits & Bombs
+    particles: [], // Splat effects
+    
+    // Tracking
+    trails: [], // Array of Arrays [{x,y}, {x,y}...] for history
+    
+    // Canvas Size
+    width: 0,
+    height: 0
+};
+
+/**
+ * CLASSES
+ */
+class GameObject {
+    constructor(x, y, type) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 10; // Horizontal spread
+        this.vy = -(Math.random() * 5 + 10); // Initial upward toss force
+        this.rotation = 0;
+        this.rSpeed = (Math.random() - 0.5) * 0.2;
+        this.active = true;
+        
+        if (type === 'bomb') {
+            this.isBomb = true;
+            this.emoji = '💣';
+            this.size = 45;
+        } else {
+            // Random fruit
+            const f = FRUITS[Math.floor(Math.random() * FRUITS.length)];
+            this.isBomb = false;
+            this.emoji = f.emoji;
+            this.color = f.color;
+            this.size = f.size;
+            this.scoreVal = f.score;
+        }
+    }
+
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vy += CONFIG.GRAVITY;
+        this.rotation += this.rSpeed;
+
+        // Deactivate if falls off screen
+        if (this.y > state.height + 100) {
+            this.active = false;
+        }
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.rotation);
+        ctx.font = `${this.size * 2}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(this.emoji, 0, 0);
+        ctx.restore();
+    }
+}
+
+class Particle {
+    constructor(x, y, color) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 10;
+        this.vy = (Math.random() - 0.5) * 10;
+        this.life = 1.0;
+        this.color = color;
+        this.size = Math.random() * 5 + 2;
+    }
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life -= 0.03;
+    }
+    draw(ctx) {
+        ctx.globalAlpha = this.life;
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI*2);
+        ctx.fill();
+        ctx.globalAlpha = 1.0;
+    }
+}
+
+/**
+ * INITIALIZATION
+ */
+async function init() {
+    try {
+        await setupCamera();
+        
+        const model = handPoseDetection.SupportedModels.MediaPipeHands;
+        const detectorConfig = {
+            runtime: 'mediapipe',
+            solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands',
+            modelType: 'full',
+            maxHands: 2 // Dual wield!
+        };
+        state.detector = await handPoseDetection.createDetector(model, detectorConfig);
+        state.isModelReady = true;
+
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+        
+        document.getElementById('loading-screen').classList.add('hidden');
+        document.getElementById('start-screen').classList.remove('hidden');
+        
+        requestAnimationFrame(gameLoop);
+
+    } catch (e) {
+        alert("Camera access denied or error: " + e.message);
+    }
+}
+
+async function setupCamera() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+    state.video.srcObject = stream;
+    return new Promise(r => { state.video.onloadedmetadata = () => { state.video.play(); r(); } });
+}
+
+function resizeCanvas() {
+    state.width = state.video.videoWidth;
+    state.height = state.video.videoHeight;
+    state.canvas.width = state.width;
+    state.canvas.height = state.height;
+}
+
+/**
+ * GAME LOGIC
+ */
+function startGame() {
+    state.score = 0;
+    state.lives = 3;
+    state.objects = [];
+    state.particles = [];
+    state.trails = [];
+    state.isActive = true;
+    state.flashIntensity = 0;
+    
+    updateHUD();
+    document.getElementById('start-screen').classList.add('hidden');
+    document.getElementById('game-over-screen').classList.add('hidden');
+}
+
+function gameOver() {
+    state.isActive = false;
+    document.getElementById('final-score').innerText = state.score;
+    document.getElementById('game-over-screen').classList.remove('hidden');
+}
+
+function spawnObject() {
+    const x = Math.random() * (state.width - 100) + 50;
+    const y = state.height + 50;
+    const type = Math.random() < CONFIG.BOMB_PROBABILITY ? 'bomb' : 'fruit';
+    state.objects.push(new GameObject(x, y, type));
+}
+
+function updateHUD() {
+    document.getElementById('score').innerText = state.score;
+    let hearts = "";
+    for(let i=0; i<state.lives; i++) hearts += "❤️";
+    document.getElementById('lives').innerText = hearts;
+}
+
+function triggerBombFlash() {
+    state.flashIntensity = 1.0;
+}
+
+function createExplosion(x, y, color, count=10) {
+    for(let i=0; i<count; i++) {
+        state.particles.push(new Particle(x, y, color));
+    }
+}
+
+/**
+ * MAIN LOOP
+ */
+async function gameLoop() {
+    // 1. Detection
+    if (state.isModelReady && state.video.readyState >= 2) {
+        const hands = await state.detector.estimateHands(state.video, { flipHorizontal: true });
+        
+        state.ctx.clearRect(0, 0, state.width, state.height);
+        
+        // 2. Process Game Physics
+        if (state.isActive) {
+            // Spawn
+            state.frames++;
+            if (state.frames % CONFIG.SPAWN_RATE === 0) spawnObject();
+
+            // Update Objects
+            state.objects.forEach(obj => obj.update());
+            state.particles.forEach(p => p.update());
+            
+            // Cleanup
+            state.objects = state.objects.filter(o => o.active);
+            state.particles = state.particles.filter(p => p.life > 0);
+
+            // Update Hand Trails (The Blade Logic)
+            // Resize state.trails to match detected hands count
+            // Note: simple index matching. If hand leaves, trail resets.
+            if (state.trails.length > hands.length) {
+                state.trails = state.trails.slice(0, hands.length);
+            }
+            
+            // Active points for collision this frame
+            let collisionPoints = []; 
+
+            hands.forEach((hand, i) => {
+                const rawTip = hand.keypoints[8];
+                
+                // Apply Offset here:
+                const tipX = rawTip.x;
+                const tipY = rawTip.y + CONFIG.Y_OFFSET;
+
+                if (!state.trails[i]) state.trails[i] = [];
+                
+                // Add new point to history
+                state.trails[i].push({ x: tipX, y: tipY });
+                
+                // Keep trail limited length
+                if (state.trails[i].length > CONFIG.TRAIL_LENGTH) {
+                    state.trails[i].shift();
+                }
+                
+                collisionPoints.push({ x: tipX, y: tipY });
+            });
+
+            // Collision Detection
+            collisionPoints.forEach(point => {
+                state.objects.forEach(obj => {
+                    if (!obj.active) return;
+                    
+                    const dist = Math.hypot(point.x - obj.x, point.y - obj.y);
+                    
+                    if (dist < obj.size) {
+                        // HIT!
+                        obj.active = false;
+                        
+                        if (obj.isBomb) {
+                            state.lives--;
+                            triggerBombFlash(); // FLASH!
+                            createExplosion(obj.x, obj.y, '#ffffff', 20);
+                            updateHUD();
+                            if (state.lives <= 0) gameOver();
+                        } else {
+                            state.score += obj.scoreVal;
+                            createExplosion(obj.x, obj.y, obj.color, 15);
+                            updateHUD();
+                        }
+                    }
+                });
+            });
+        }
+
+        // 3. Render
+        
+        // Draw Objects
+        state.objects.forEach(obj => obj.draw(state.ctx));
+        state.particles.forEach(p => p.draw(state.ctx));
+
+        // Draw Trails (The "Swoosh")
+        state.ctx.lineCap = 'round';
+        state.ctx.lineJoin = 'round';
+        
+        state.trails.forEach(trail => {
+            if (trail.length < 2) return;
+            
+            // Draw tapered line segments
+            for (let i = 1; i < trail.length; i++) {
+                const prev = trail[i-1];
+                const curr = trail[i];
+                
+                state.ctx.beginPath();
+                state.ctx.moveTo(prev.x, prev.y);
+                state.ctx.lineTo(curr.x, curr.y);
+                
+                // Taper width from 0 to 15
+                const width = (i / trail.length) * 15;
+                state.ctx.lineWidth = width;
+                
+                // Fade color slightly at tail?
+                state.ctx.strokeStyle = CONFIG.BLADE_COLOR;
+                state.ctx.shadowBlur = 15;
+                state.ctx.shadowColor = CONFIG.BLADE_COLOR;
+                
+                state.ctx.stroke();
+            }
+            
+            state.ctx.shadowBlur = 0; // Reset
+            
+            // Draw glowing tip
+            const last = trail[trail.length - 1];
+            state.ctx.fillStyle = 'white';
+            state.ctx.beginPath();
+            state.ctx.arc(last.x, last.y, 6, 0, Math.PI*2);
+            state.ctx.fill();
+        });
+
+        // 4. Render Bomb Flash
+        if (state.flashIntensity > 0) {
+            state.ctx.fillStyle = 'white';
+            state.ctx.globalAlpha = state.flashIntensity;
+            state.ctx.fillRect(0, 0, state.width, state.height);
+            state.ctx.globalAlpha = 1.0;
+            
+            // Decay flash
+            state.flashIntensity -= 0.1;
+            if (state.flashIntensity < 0) state.flashIntensity = 0;
+        }
+    }
+
+    requestAnimationFrame(gameLoop);
+}
+
+// Kickoff
+init();
+
+</script>
+</body>
+</html>
