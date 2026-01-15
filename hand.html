@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Hand Skeleton Debugger</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- TensorFlow.js Core and Backend -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    
+    <!-- MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
+    
+    <!-- TensorFlow Hand Pose Detection -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection"></script>
+
+    <style>
+        body {
+            background-color: #000;
+            color: white;
+            font-family: monospace;
+            overflow: hidden;
+            touch-action: none;
+        }
+
+        #camera-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* Shared positioning */
+        video, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        /* Video defaults to mirrored */
+        video {
+            transform: scaleX(-1);
+        }
+        
+        canvas {
+            transform: none;
+        }
+        
+        /* UI Panels */
+        .ui-panel {
+            background: rgba(0, 0, 0, 0.85);
+            border: 1px solid #333;
+            border-radius: 8px;
+            backdrop-filter: blur(4px);
+            transition: opacity 0.3s ease, transform 0.3s ease;
+        }
+
+        .ui-hidden {
+            opacity: 0;
+            pointer-events: none;
+            transform: scale(0.95);
+        }
+
+        /* Debug Panel */
+        #debug-panel {
+            position: absolute;
+            top: 60px; /* moved down to make room for toggle */
+            right: 10px;
+            width: 280px;
+            max-height: 50vh;
+            padding: 10px;
+            overflow-y: auto;
+            font-size: 10px;
+            z-index: 50;
+        }
+
+        /* Offset Control Panel */
+        #offset-panel {
+            position: absolute;
+            bottom: 20px;
+            right: 10px;
+            width: 140px;
+            padding: 10px;
+            z-index: 50;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .hand-data {
+            margin-bottom: 15px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 5px;
+        }
+
+        .keypoint-row {
+            display: flex;
+            justify-content: space-between;
+            color: #aaa;
+        }
+        
+        /* Control Buttons */
+        .ctrl-btn {
+            background: #333;
+            border: 1px solid #555;
+            color: white;
+            width: 30px;
+            height: 30px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            user-select: none;
+        }
+        .ctrl-btn:active { background: #555; }
+
+        /* Loading Spinner */
+        #loader {
+            position: fixed;
+            inset: 0;
+            background: black;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+        
+        /* Master Toggle */
+        #ui-toggle {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 60;
+            background: rgba(0,0,0,0.6);
+            border: 1px solid #444;
+            border-radius: 50%;
+            width: 40px; 
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Loading Screen -->
+    <div id="loader">
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500 mb-4"></div>
+        <h2 class="text-xl font-bold text-green-500">Loading Hand Model...</h2>
+        <p class="text-gray-400 text-xs mt-2">First load may take 10-20 seconds</p>
+    </div>
+
+    <!-- Main App -->
+    <div id="camera-container">
+        
+        <!-- Master UI Toggle -->
+        <button id="ui-toggle">👁️</button>
+
+        <!-- Top Left Controls (Flipping) -->
+        <div id="flip-controls" class="absolute top-2 left-2 z-[60] flex flex-col gap-2 ui-panel p-2">
+            <button id="flip-view-btn" class="bg-gray-800 hover:bg-gray-700 text-white border border-gray-600 px-3 py-2 rounded text-xs transition-colors text-left w-32">
+                👁️ View: Mirrored
+            </button>
+            <button id="flip-ai-btn" class="bg-gray-800 hover:bg-gray-700 text-white border border-gray-600 px-3 py-2 rounded text-xs transition-colors text-left w-32">
+                🤖 AI: Mirrored
+            </button>
+        </div>
+
+        <video id="video" playsinline muted autoplay></video>
+        <canvas id="canvas"></canvas>
+        
+        <!-- Debug Data Panel -->
+        <div id="debug-panel" class="ui-panel">
+            <h3 class="font-bold text-green-400 mb-2 border-b border-gray-600 pb-1">DATA STREAM</h3>
+            <div class="flex justify-between mb-2">
+                <span>FPS: <span id="fps" class="text-white">0</span></span>
+                <span>Hands: <span id="hand-count" class="text-white">0</span></span>
+            </div>
+            <div id="json-output">Waiting for hands...</div>
+        </div>
+
+        <!-- Offset Adjustment Panel -->
+        <div id="offset-panel" class="ui-panel">
+            <div class="text-[10px] text-gray-400 mb-1">OVERLAY OFFSET</div>
+            <div class="flex justify-center w-full">
+                <button class="ctrl-btn" onclick="adjustOffset(0, -5)">▲</button>
+            </div>
+            <div class="flex justify-center gap-2 w-full my-1">
+                <button class="ctrl-btn" onclick="adjustOffset(-5, 0)">◀</button>
+                <button class="ctrl-btn text-xs w-auto px-2" onclick="resetOffset()">RST</button>
+                <button class="ctrl-btn" onclick="adjustOffset(5, 0)">▶</button>
+            </div>
+            <div class="flex justify-center w-full">
+                <button class="ctrl-btn" onclick="adjustOffset(0, 5)">▼</button>
+            </div>
+            <div class="text-[9px] text-green-400 mt-1" id="offset-display">X:0 Y:0</div>
+        </div>
+    </div>
+
+<script>
+/**
+ * CONFIGURATION & STATE
+ */
+const state = {
+    video: document.getElementById('video'),
+    canvas: document.getElementById('canvas'),
+    ctx: document.getElementById('canvas').getContext('2d'),
+    detector: null,
+    isModelReady: false,
+    lastFrameTime: 0,
+    isViewMirrored: true, 
+    isAiMirrored: true,
+    // Overlay Offsets
+    offsetX: 0,
+    offsetY: 0,
+    uiVisible: true
+};
+
+// UI Toggling
+const uiToggleBtn = document.getElementById('ui-toggle');
+const panels = [
+    document.getElementById('debug-panel'), 
+    document.getElementById('offset-panel'),
+    document.getElementById('flip-controls')
+];
+
+uiToggleBtn.addEventListener('click', () => {
+    state.uiVisible = !state.uiVisible;
+    panels.forEach(p => {
+        if (state.uiVisible) p.classList.remove('ui-hidden');
+        else p.classList.add('ui-hidden');
+    });
+    uiToggleBtn.innerText = state.uiVisible ? "👁️" : "🙈";
+});
+
+// Flip Controls
+const viewBtn = document.getElementById('flip-view-btn');
+viewBtn.addEventListener('click', () => {
+    state.isViewMirrored = !state.isViewMirrored;
+    const transform = state.isViewMirrored ? "scaleX(-1)" : "scaleX(1)";
+    state.video.style.transform = transform;
+    viewBtn.innerText = state.isViewMirrored ? "👁️ View: Mirrored" : "👁️ View: Normal";
+});
+
+const aiBtn = document.getElementById('flip-ai-btn');
+aiBtn.addEventListener('click', () => {
+    state.isAiMirrored = !state.isAiMirrored;
+    aiBtn.innerText = state.isAiMirrored ? "🤖 AI: Mirrored" : "🤖 AI: Normal";
+});
+
+// Offset Controls
+window.adjustOffset = (dx, dy) => {
+    state.offsetX += dx;
+    state.offsetY += dy;
+    updateOffsetDisplay();
+};
+
+window.resetOffset = () => {
+    state.offsetX = 0;
+    state.offsetY = 0;
+    updateOffsetDisplay();
+};
+
+function updateOffsetDisplay() {
+    document.getElementById('offset-display').innerText = `X:${state.offsetX} Y:${state.offsetY}`;
+}
+
+// Keypoint Map
+const FINGER_JOINTS = [
+    [0, 1], [1, 2], [2, 3], [3, 4],     // Thumb
+    [0, 5], [5, 6], [6, 7], [7, 8],     // Index
+    [0, 9], [9, 10], [10, 11], [11, 12],// Middle
+    [0, 13], [13, 14], [14, 15], [15, 16], // Ring
+    [0, 17], [17, 18], [18, 19], [19, 20]  // Pinky
+];
+
+const KEYPOINT_NAMES = [
+    "Wrist", 
+    "Thumb_CMC", "Thumb_MCP", "Thumb_IP", "Thumb_TIP",
+    "Index_MCP", "Index_PIP", "Index_DIP", "Index_TIP",
+    "Middle_MCP", "Middle_PIP", "Middle_DIP", "Middle_TIP",
+    "Ring_MCP", "Ring_PIP", "Ring_DIP", "Ring_TIP",
+    "Pinky_MCP", "Pinky_PIP", "Pinky_DIP", "Pinky_TIP"
+];
+
+/**
+ * INITIALIZATION
+ */
+async function init() {
+    try {
+        await setupCamera();
+        
+        const model = handPoseDetection.SupportedModels.MediaPipeHands;
+        const detectorConfig = {
+            runtime: 'mediapipe',
+            solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands',
+            modelType: 'full',
+            maxHands: 2
+        };
+        
+        state.detector = await handPoseDetection.createDetector(model, detectorConfig);
+        
+        state.isModelReady = true;
+        document.getElementById('loader').style.display = 'none';
+        
+        resizeCanvas();
+        requestAnimationFrame(renderLoop);
+        
+    } catch (e) {
+        alert("Error: " + e.message);
+        console.error(e);
+    }
+}
+
+async function setupCamera() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+            facingMode: 'user', 
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+        }
+    });
+
+    state.video.srcObject = stream;
+    
+    return new Promise((resolve) => {
+        state.video.onloadedmetadata = () => {
+            state.video.play();
+            resolve(state.video);
+        };
+    });
+}
+
+function resizeCanvas() {
+    state.canvas.width = state.video.videoWidth;
+    state.canvas.height = state.video.videoHeight;
+}
+window.addEventListener('resize', resizeCanvas);
+
+/**
+ * RENDER LOOP
+ */
+async function renderLoop() {
+    const now = performance.now();
+    const fps = 1000 / (now - state.lastFrameTime);
+    state.lastFrameTime = now;
+    document.getElementById('fps').innerText = fps.toFixed(0);
+
+    if (state.isModelReady && state.video.readyState >= 2) {
+        // Detect
+        const hands = await state.detector.estimateHands(state.video, {
+            flipHorizontal: state.isAiMirrored
+        });
+        
+        // Draw
+        const ctx = state.ctx;
+        const width = state.canvas.width;
+        const height = state.canvas.height;
+        
+        ctx.clearRect(0, 0, width, height);
+        
+        // Apply Global Offset for Overlay
+        ctx.save();
+        ctx.translate(state.offsetX, state.offsetY);
+        
+        document.getElementById('hand-count').innerText = hands.length;
+        if(state.uiVisible) updateDebugPanel(hands); // Only update DOM if visible to save perf
+
+        hands.forEach(hand => {
+            drawSkeleton(ctx, hand.keypoints3D, hand.keypoints, hand.handedness);
+        });
+        
+        ctx.restore();
+    }
+
+    requestAnimationFrame(renderLoop);
+}
+
+/**
+ * VISUALIZATION
+ */
+function drawSkeleton(ctx, keypoints3D, keypoints, handedness) {
+    const color = handedness === 'Left' ? '#60a5fa' : '#f87171'; // Blue Left, Red Right
+    
+    // Draw Connections
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = color;
+    
+    FINGER_JOINTS.forEach(([startIdx, endIdx]) => {
+        const start = keypoints[startIdx];
+        const end = keypoints[endIdx];
+        
+        ctx.beginPath();
+        ctx.moveTo(start.x, start.y);
+        ctx.lineTo(end.x, end.y);
+        ctx.stroke();
+    });
+
+    // Draw Keypoints
+    ctx.fillStyle = 'white';
+    keypoints.forEach((kp) => {
+        ctx.beginPath();
+        ctx.arc(kp.x, kp.y, 4, 0, 2 * Math.PI);
+        ctx.fill();
+    });
+    
+    // Draw Labels (Wrist)
+    const wrist = keypoints[0];
+    ctx.fillStyle = color;
+    ctx.font = "bold 20px Arial";
+    ctx.fillText(`${handedness} Hand`, wrist.x + 10, wrist.y);
+    ctx.font = "12px monospace";
+    ctx.fillStyle = "#ccc";
+    ctx.fillText(`Score: ${Math.round(wrist.score || 0.99 * 100)}%`, wrist.x + 10, wrist.y + 15);
+}
+
+/**
+ * DEBUG UI UPDATE
+ */
+function updateDebugPanel(hands) {
+    const container = document.getElementById('json-output');
+    
+    if (hands.length === 0) {
+        container.innerHTML = "<div class='text-gray-500 italic'>No hands detected</div>";
+        return;
+    }
+
+    let html = "";
+
+    hands.forEach((hand, index) => {
+        const colorClass = hand.handedness === 'Left' ? 'text-blue-400' : 'text-red-400';
+        
+        html += `<div class="hand-data">`;
+        html += `<div class="font-bold ${colorClass}">#${index+1}: ${hand.handedness} Hand</div>`;
+        html += `<div class="text-xs mb-1">Confidence: ${(hand.score * 100).toFixed(1)}%</div>`;
+        
+        // Header
+        html += `<div class="flex justify-between text-[9px] text-gray-500 border-b border-gray-700 pb-1 mb-1">`;
+        html += `<span class="w-[30%]">POINT</span><span class="w-[20%] text-right">X</span><span class="w-[20%] text-right">Y</span><span class="w-[20%] text-right">Z</span>`;
+        html += `</div>`;
+
+        // Keypoints List
+        hand.keypoints.forEach((kp, i) => {
+            const z = hand.keypoints3D ? hand.keypoints3D[i].z.toFixed(3) : "N/A";
+            
+            html += `<div class="keypoint-row text-[9px]">`;
+            html += `<span class="w-[30%] text-left text-gray-300">${i}-${KEYPOINT_NAMES[i].split('_').pop()}</span>`;
+            html += `<span class="w-[20%] text-right text-yellow-200">${Math.round(kp.x)}</span>`;
+            html += `<span class="w-[20%] text-right text-yellow-200">${Math.round(kp.y)}</span>`;
+            html += `<span class="w-[20%] text-right text-cyan-200">${z}</span>`;
+            html += `</div>`;
+        });
+        
+        html += `</div>`;
+    });
+
+    container.innerHTML = html;
+}
+
+// Start
+init();
+
+</script>
+</body>
+</html>
