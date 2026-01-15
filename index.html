@@ -124,17 +124,13 @@
         
         <!-- Controls for stuck loading -->
         <div id="troubleshoot-controls" class="hidden flex flex-col gap-3 mt-8 w-full max-w-xs">
-            <p class="text-yellow-500 text-xs text-center">Connection or Hardware Issue Detected</p>
+            <p class="text-yellow-500 text-xs text-center">Taking longer than usual...</p>
             
             <button onclick="startApp('cpu')" class="bg-gray-700 border border-gray-600 active:bg-gray-600 text-white py-3 px-4 rounded-lg text-sm font-semibold shadow-sm">
-                🛡️ Force CPU Mode (Slow but Safe)
+                🛡️ Force CPU Mode
             </button>
             
-            <button onclick="startApp('webgl')" class="bg-blue-900/50 border border-blue-800 text-blue-200 py-3 px-4 rounded-lg text-sm shadow-sm">
-                🚀 Retry WebGL
-            </button>
-
-             <button onclick="location.reload()" class="bg-red-900/50 border border-red-800 text-red-200 py-3 px-4 rounded-lg text-sm shadow-sm">
+            <button onclick="location.reload()" class="bg-red-900/50 border border-red-800 text-red-200 py-3 px-4 rounded-lg text-sm shadow-sm">
                 ↻ Reload Page
             </button>
         </div>
@@ -371,12 +367,12 @@ window.onload = function() {
         return;
     }
     
-    // Set a failsafe timer to show controls
+    // Set a failsafe timer to show controls (Increased to 12s)
     loadTimer = setTimeout(() => {
         document.getElementById('troubleshoot-controls').classList.remove('hidden');
         log("Taking a while? Try Force CPU Mode.");
         document.getElementById('debug-console').style.display = 'block';
-    }, 8000);
+    }, 12000);
 
     // Initial attempt: WebGL
     startApp('webgl');
@@ -384,7 +380,7 @@ window.onload = function() {
 
 async function startApp(backendType) {
     try {
-        // Reset UI
+        // Reset UI if retrying
         document.getElementById('troubleshoot-controls').classList.add('hidden');
         document.querySelector('.animate-spin').classList.remove('hidden');
         
@@ -412,21 +408,42 @@ async function startApp(backendType) {
         log(`Backend active: ${tf.getBackend()}`);
 
         // 3. Load Model
-        log("Downloading Model (Default)...");
-        
-        // Use bare .load() to rely on defaults, avoid 'lite' config issues
+        log("Downloading Model...");
         state.model = await cocoSsd.load();
         
         log("Model Loaded Successfully!");
         
-        // 4. Run
-        state.loader.classList.add('hidden');
-        document.getElementById('ui-panel').classList.remove('hidden');
-        document.getElementById('debug-console').style.display = 'none';
-        state.isStreamReady = true;
+        // --- CRITICAL FIX START ---
+        // Clear the fail-safe timer IMMEDIATELY upon success
+        clearTimeout(loadTimer);
         
+        // Ensure video dimensions are ready before proceeding (Fixes iOS crash)
+        if (state.video.readyState < 2) {
+             log("Waiting for video stream data...");
+             await new Promise(r => {
+                 const check = setInterval(() => {
+                     if (state.video.readyState >= 2 && state.video.videoWidth > 0) {
+                         clearInterval(check);
+                         r();
+                     }
+                 }, 100);
+             });
+        }
+        
+        // Explicitly play just in case
+        try { state.video.play(); } catch(e) {}
+
+        // 4. Run UI Transition
+        log("Starting Engine...");
+        document.getElementById('troubleshoot-controls').classList.add('hidden'); // Double ensure hidden
+        state.loader.classList.add('hidden'); // Hide overlay
+        document.getElementById('ui-panel').classList.remove('hidden'); // Show controls
+        document.getElementById('debug-console').style.display = 'none'; // Hide debug
+        
+        state.isStreamReady = true;
         resizeCanvas();
         requestAnimationFrame(gameLoop);
+        // --- CRITICAL FIX END ---
 
     } catch (err) {
         log(`ERROR: ${err.message}`);
@@ -463,6 +480,9 @@ async function setupCamera() {
 }
 
 function resizeCanvas() {
+    // Safety check for 0 dimensions
+    if (state.video.videoWidth === 0 || state.video.videoHeight === 0) return;
+    
     state.canvas.width = state.video.videoWidth;
     state.canvas.height = state.video.videoHeight;
 }
