@@ -8,9 +8,10 @@
     <!-- Tailwind CSS for rapid UI styling -->
     <script src="https://cdn.tailwindcss.com"></script>
     
-    <!-- TensorFlow.js and Coco-SSD (Updated Versions) -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+    <!-- TensorFlow.js and Coco-SSD -->
+    <!-- Using 2.2.2 for better stability on older iOS Safari -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
 
     <style>
         body {
@@ -39,16 +40,11 @@
             object-fit: cover;
         }
         
-        /* Transform video to fix mirroring if using front camera (we default to rear though) */
-        .mirror {
-            transform: scaleX(-1);
-        }
-
         /* Loading Overlay */
         #loader {
             position: fixed;
             inset: 0;
-            background: rgba(0,0,0,0.85);
+            background: rgba(0,0,0,0.95);
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -103,14 +99,21 @@
     <!-- Loading Screen -->
     <div id="loader">
         <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
-        <h2 class="text-xl font-bold">Initializing Physics Engine...</h2>
-        <p class="text-gray-400 text-sm mt-2" id="status-text">Requesting Camera Access...</p>
-        <p class="text-red-400 text-xs mt-4 hidden" id="error-help">This is taking longer than usual. Please wait...</p>
+        <h2 class="text-xl font-bold" id="status-title">Initializing...</h2>
+        <p class="text-gray-400 text-sm mt-2" id="status-text">Starting System...</p>
         
-        <!-- Retry Button (Hidden by default) -->
-        <button id="retry-btn" class="hidden mt-6 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-full transition-colors">
-            ↻ Retry Connection
-        </button>
+        <!-- Controls for stuck loading -->
+        <div id="troubleshoot-controls" class="hidden flex flex-col gap-3 mt-8 w-full max-w-xs">
+            <p class="text-yellow-500 text-xs">Stuck? Try these options:</p>
+            
+            <button onclick="init(true)" class="bg-gray-700 border border-gray-600 active:bg-gray-600 text-white py-3 px-4 rounded-lg text-sm font-semibold shadow-sm">
+                🛡️ Force Safe Mode (CPU)
+            </button>
+            
+            <button onclick="location.reload()" class="bg-red-900/50 border border-red-800 text-red-200 py-3 px-4 rounded-lg text-sm shadow-sm">
+                ↻ Reload Page
+            </button>
+        </div>
     </div>
 
     <!-- Main Viewport -->
@@ -121,7 +124,7 @@
     </div>
 
     <!-- Controls -->
-    <div id="ui-panel">
+    <div id="ui-panel" class="hidden">
         <div class="flex flex-col gap-4">
             
             <!-- Stats & Info -->
@@ -150,7 +153,7 @@
             </div>
             
             <p class="text-xs text-center text-gray-500 mt-2">
-                Point at an object (cup, person, phone) and tap Track.
+                Point at object & tap Track.
             </p>
         </div>
     </div>
@@ -160,10 +163,10 @@
  * APP STATE & CONFIGURATION
  */
 const CONFIG = {
-    CONFIDENCE_THRESHOLD: 0.55, // Lowered slightly for better lock-on
-    TRACKING_DISTANCE_THRESHOLD: 150, // Max pixels an object can move between frames to be considered "same"
-    SMOOTHING_BUFFER: 8, // Number of frames to average for velocity
-    LOST_TTL: 30, // Frames to keep an object alive if detection misses briefly
+    CONFIDENCE_THRESHOLD: 0.55,
+    TRACKING_DISTANCE_THRESHOLD: 150, 
+    SMOOTHING_BUFFER: 8,
+    LOST_TTL: 30,
 };
 
 const state = {
@@ -172,39 +175,30 @@ const state = {
     canvas: document.getElementById('canvas'),
     ctx: document.getElementById('canvas').getContext('2d'),
     status: document.getElementById('status-text'),
+    statusTitle: document.getElementById('status-title'),
     loader: document.getElementById('loader'),
     
-    // Tracking State
-    trackedObjects: [], // Array of TrackedObject instances
+    trackedObjects: [],
     nextId: 1,
     vectorScale: 5,
     isStreamReady: false,
     
-    // Performance
     lastFrameTime: 0,
     frameCount: 0
 };
 
 /**
  * CLASS: Tracked Object
- * Handles physics calculations, smoothing, and state maintenance for a single entity.
  */
 class TrackedObject {
     constructor(id, box, label) {
         this.id = id;
         this.label = label;
         this.color = this.generateColor(id);
-        
-        // State
         this.active = true;
         this.lostFrames = 0;
-        
-        // Physics
-        // Box format: [x, y, width, height]
         this.currentBox = box;
         this.center = this.getCenter(box);
-        
-        // History for smoothing (Circular buffer concept)
         this.positionHistory = []; 
         this.velocity = { x: 0, y: 0 };
     }
@@ -217,7 +211,7 @@ class TrackedObject {
     }
 
     generateColor(id) {
-        const hue = (id * 137.508) % 360; // Golden angle approx
+        const hue = (id * 137.508) % 360; 
         return `hsl(${hue}, 100%, 50%)`;
     }
 
@@ -227,14 +221,12 @@ class TrackedObject {
         this.currentBox = newBox;
         const newCenter = this.getCenter(newBox);
         
-        // Add to history
         this.positionHistory.push({
             x: newCenter.x,
             y: newCenter.y,
             time: performance.now()
         });
 
-        // Limit history size
         if (this.positionHistory.length > CONFIG.SMOOTHING_BUFFER) {
             this.positionHistory.shift();
         }
@@ -253,20 +245,15 @@ class TrackedObject {
     calculateVelocity() {
         if (this.positionHistory.length < 2) return;
 
-        // Calculate velocity based on the difference between oldest and newest in buffer
-        // This acts as a low-pass filter naturally
         const newest = this.positionHistory[this.positionHistory.length - 1];
         const oldest = this.positionHistory[0];
-        
-        const dt = (newest.time - oldest.time) / 1000; // in seconds
+        const dt = (newest.time - oldest.time) / 1000;
         
         if (dt === 0) return;
 
-        // Velocity in pixels per second
         const rawVx = (newest.x - oldest.x) / dt;
         const rawVy = (newest.y - oldest.y) / dt;
 
-        // Apply simple damping
         this.velocity.x = rawVx;
         this.velocity.y = rawVy;
     }
@@ -278,33 +265,24 @@ class TrackedObject {
         const cx = this.center.x;
         const cy = this.center.y;
 
-        // 1. Draw Bounding Box
         ctx.strokeStyle = this.color;
         ctx.lineWidth = 4;
         ctx.strokeRect(x, y, w, h);
 
-        // 2. Draw Label
         ctx.fillStyle = this.color;
         ctx.font = "bold 16px Arial";
         ctx.fillText(`#${this.id} ${this.label}`, x, y - 10);
         
-        // Speed Text
         const speed = Math.sqrt(this.velocity.x**2 + this.velocity.y**2).toFixed(0);
         ctx.fillStyle = "white";
         ctx.fillText(`${speed} px/s`, x, y - 30);
 
-        // 3. Draw Vectors
-        // We scale the velocity to make it visible on screen
         const vxEnd = cx + (this.velocity.x * scale * 0.1); 
         const vyEnd = cy + (this.velocity.y * scale * 0.1);
 
-        // X Velocity (Blue)
         this.drawArrow(ctx, cx, cy, vxEnd, cy, '#3b82f6', 4);
-        
-        // Y Velocity (Red)
         this.drawArrow(ctx, cx, cy, cx, vyEnd, '#ef4444', 4);
 
-        // Resultant (Green) - Only if moving significantly
         if (speed > 10) {
             this.drawArrow(ctx, cx, cy, vxEnd, vyEnd, '#22c55e', 2);
         }
@@ -316,20 +294,17 @@ class TrackedObject {
         const dy = toY - fromY;
         const angle = Math.atan2(dy, dx);
         
-        // Don't draw if too short
         if (Math.sqrt(dx*dx + dy*dy) < 5) return;
 
         ctx.strokeStyle = color;
         ctx.fillStyle = color;
         ctx.lineWidth = width;
 
-        // Line
         ctx.beginPath();
         ctx.moveTo(fromX, fromY);
         ctx.lineTo(toX, toY);
         ctx.stroke();
 
-        // Head
         ctx.beginPath();
         ctx.moveTo(toX, toY);
         ctx.lineTo(toX - headLength * Math.cos(angle - Math.PI / 6), toY - headLength * Math.sin(angle - Math.PI / 6));
@@ -342,77 +317,85 @@ class TrackedObject {
 /**
  * INITIALIZATION
  */
+let loadTimer;
+
 async function init(forceCpu = false) {
+    // Show Troubleshoot buttons after 5 seconds if still loading
+    clearTimeout(loadTimer);
+    loadTimer = setTimeout(() => {
+        document.getElementById('troubleshoot-controls').classList.remove('hidden');
+    }, 5000);
+
     try {
-        // Reset UI state for retry
-        state.loader.querySelector('.animate-spin').classList.remove('hidden');
-        document.getElementById('retry-btn').classList.add('hidden');
-        state.status.classList.remove('text-red-500');
+        state.status.innerText = "Initializing Backend...";
         
-        // 1. Setup Camera
+        // 1. Setup Camera (if not already)
         if (!state.video.srcObject) {
+            state.status.innerText = "Requesting Camera...";
             await setupCamera();
         }
         
-        // 2. Prepare TensorFlow Backend
-        state.status.innerText = "Starting AI Engine...";
-        await tf.ready();
-        
+        // 2. Configure TF Backend
         if (forceCpu) {
             console.log("Forcing CPU backend...");
             await tf.setBackend('cpu');
             state.status.innerText = "Mode: CPU (Safe Mode)...";
         } else {
-            // Try WebGL, fallback to CPU automatically if it fails
             try {
+                // Try WebGL but fail fast
                 await tf.setBackend('webgl');
-                state.status.innerText = "Mode: WebGL Acceleration...";
+                // Optional: Reduce memory pressure on iOS
+                tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 0);
+                state.status.innerText = "Mode: WebGL (Accelerated)...";
             } catch(e) {
                 console.warn("WebGL failed, falling back to CPU", e);
                 await tf.setBackend('cpu');
+                state.status.innerText = "Mode: CPU Fallback...";
             }
         }
 
-        // 3. Load AI with Timeout
-        state.status.innerText = "Downloading Model (may take 60s)...";
-        document.getElementById('error-help').classList.remove('hidden');
-
-        // Extended timeout to 60 seconds
-        const modelPromise = cocoSsd.load({ base: 'lite_mobilenet_v2' });
+        // 3. Load Model
+        state.statusTitle.innerText = "Downloading AI Model...";
+        state.status.innerText = "Fetching weights from Google Servers...";
+        
+        // Use default model config (usually more reliable CDN path than 'lite' explicit arg in older versions)
+        // If forceCpu is true, we stick to default which is MobileNetV2
+        let modelPromise;
+        if(forceCpu) {
+             modelPromise = cocoSsd.load(); // Default config
+        } else {
+             // Try lite, but if it fails, the retry button allows Safe Mode (Standard)
+             modelPromise = cocoSsd.load({ base: 'lite_mobilenet_v2' });
+        }
+        
         const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error("Connection timed out. Click Retry.")), 60000)
+            setTimeout(() => reject(new Error("Network Timeout")), 45000)
         );
 
         state.model = await Promise.race([modelPromise, timeoutPromise]);
         
-        // 4. Start Loop
+        // 4. Start
         state.loader.classList.add('hidden');
+        document.getElementById('ui-panel').classList.remove('hidden');
         state.isStreamReady = true;
         resizeCanvas();
         requestAnimationFrame(gameLoop);
 
     } catch (err) {
-        state.status.innerText = `Error: ${err.message}`;
-        state.status.classList.add('text-red-500');
-        document.querySelector('.animate-spin').classList.add('hidden'); // Stop spinner
-        document.getElementById('retry-btn').classList.remove('hidden'); // Show retry
+        state.statusTitle.innerText = "Initialization Failed";
+        state.status.innerText = `${err.message}`;
+        state.status.classList.add('text-red-400');
+        document.querySelector('.animate-spin').classList.add('hidden');
+        document.getElementById('troubleshoot-controls').classList.remove('hidden');
         console.error(err);
     }
 }
-
-// Retry Button Listener
-document.getElementById('retry-btn').addEventListener('click', () => {
-    // When retrying, force CPU mode if the first attempt might have been a WebGL hang,
-    // or just try again. For now, we just try again cleanly.
-    state.status.innerText = "Retrying...";
-    init(false); 
-});
 
 async function setupCamera() {
     const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
-            facingMode: 'environment', // Rear camera preferred
+            facingMode: 'environment',
             width: { ideal: 1280 },
             height: { ideal: 720 }
         }
@@ -428,67 +411,53 @@ async function setupCamera() {
 }
 
 function resizeCanvas() {
-    // Match canvas internal resolution to video resolution
-    // CSS handles the visual scaling to fullscreen
     state.canvas.width = state.video.videoWidth;
     state.canvas.height = state.video.videoHeight;
 }
-
 window.addEventListener('resize', resizeCanvas);
 
 /**
  * CORE LOGIC LOOP
  */
 async function gameLoop() {
-    // FPS Calculation
     const now = performance.now();
     const fps = 1000 / (now - state.lastFrameTime);
     state.lastFrameTime = now;
-    if (state.frameCount++ % 10 === 0) { // Update text rarely
+    
+    if (state.frameCount++ % 10 === 0) { 
         document.getElementById('fps-counter').innerText = `FPS: ${fps.toFixed(0)}`;
     }
 
-    // 1. Detection
     if (state.isStreamReady && state.model) {
-        const predictions = await state.model.detect(state.video, undefined, CONFIG.CONFIDENCE_THRESHOLD);
-        
-        // 2. Logic: Update Tracked Objects
-        updateTracking(predictions);
-        
-        // 3. Render
-        render();
+        try {
+            // Lower threshold for better tracking continuity
+            const predictions = await state.model.detect(state.video, undefined, CONFIG.CONFIDENCE_THRESHOLD);
+            updateTracking(predictions);
+            render();
+        } catch (e) {
+            console.error("Detection Error:", e);
+        }
     }
 
     requestAnimationFrame(gameLoop);
 }
 
-/**
- * TRACKING ALGORITHM
- * Associates new predictions with existing objects using Euclidean distance.
- */
 function updateTracking(predictions) {
-    // Flag all existing as potentially lost first
     state.trackedObjects.forEach(obj => obj.matchedThisFrame = false);
-
-    // Filter weak predictions
     const validPredictions = predictions.filter(p => p.score > CONFIG.CONFIDENCE_THRESHOLD);
 
-    // Match predictions to existing objects
     validPredictions.forEach(pred => {
         const predCenter = {
             x: pred.bbox[0] + pred.bbox[2] / 2,
             y: pred.bbox[1] + pred.bbox[3] / 2
         };
 
-        // Find closest existing object
         let closestObj = null;
         let minDist = Infinity;
 
         state.trackedObjects.forEach(obj => {
-            if (obj.matchedThisFrame) return; // Already matched
-            
+            if (obj.matchedThisFrame) return;
             const dist = Math.hypot(obj.center.x - predCenter.x, obj.center.y - predCenter.y);
-            
             if (dist < CONFIG.TRACKING_DISTANCE_THRESHOLD && dist < minDist) {
                 minDist = dist;
                 closestObj = obj;
@@ -501,35 +470,25 @@ function updateTracking(predictions) {
         }
     });
 
-    // Handle unmatched objects
-    state.trackedObjects.forEach((obj, index) => {
-        if (!obj.matchedThisFrame) {
-            obj.markLost();
-        }
+    state.trackedObjects.forEach((obj) => {
+        if (!obj.matchedThisFrame) obj.markLost();
     });
 
-    // Remove dead objects
     state.trackedObjects = state.trackedObjects.filter(obj => obj.active);
-    
-    // Update UI count
     document.getElementById('object-count').innerText = `Tracking: ${state.trackedObjects.length}`;
 }
 
 /**
- * USER INPUT HANDLERS
+ * USER INPUT
  */
-
-// Track Button Logic
 document.getElementById('track-btn').addEventListener('click', async () => {
-    // Get fresh predictions immediately
-    const predictions = await state.model.detect(state.video, undefined, 0.3); // Lower threshold to find object to click
+    const predictions = await state.model.detect(state.video, undefined, 0.3);
     
     if (predictions.length === 0) {
-        alert("No objects detected. Try moving closer or improving lighting.");
+        alert("No objects detected.");
         return;
     }
 
-    // Find object closest to center of screen
     const screenCenterX = state.video.videoWidth / 2;
     const screenCenterY = state.video.videoHeight / 2;
     
@@ -541,7 +500,6 @@ document.getElementById('track-btn').addEventListener('click', async () => {
         const cy = p.bbox[1] + p.bbox[3]/2;
         const dist = Math.hypot(cx - screenCenterX, cy - screenCenterY);
         
-        // Check if we are already tracking this one (roughly)
         const alreadyTracking = state.trackedObjects.some(t => 
             Math.hypot(t.center.x - cx, t.center.y - cy) < CONFIG.TRACKING_DISTANCE_THRESHOLD
         );
@@ -553,41 +511,27 @@ document.getElementById('track-btn').addEventListener('click', async () => {
     });
 
     if (closest) {
-        const newObj = new TrackedObject(state.nextId++, closest.bbox, closest.class);
-        state.trackedObjects.push(newObj);
-    } else {
-        // Maybe provide feedback if everything central is already tracked
-        // alert("Object already tracked or nothing in center.");
+        state.trackedObjects.push(new TrackedObject(state.nextId++, closest.bbox, closest.class));
     }
 });
 
-// Clear Button
 document.getElementById('clear-btn').addEventListener('click', () => {
     state.trackedObjects = [];
 });
 
-// Scale Slider
-const scaleInput = document.getElementById('vector-scale');
-const scaleDisplay = document.getElementById('scale-value');
-
-scaleInput.addEventListener('input', (e) => {
+document.getElementById('vector-scale').addEventListener('input', (e) => {
     state.vectorScale = parseFloat(e.target.value);
-    scaleDisplay.innerText = `x${state.vectorScale}`;
+    document.getElementById('scale-value').innerText = `x${state.vectorScale}`;
 });
 
-
-/**
- * RENDERER
- */
 function render() {
     const ctx = state.ctx;
     const width = state.canvas.width;
     const height = state.canvas.height;
 
-    // Clear Canvas
     ctx.clearRect(0, 0, width, height);
 
-    // Optional: Draw center crosshair to help user aim
+    // Center Crosshair
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -597,13 +541,12 @@ function render() {
     ctx.lineTo(width/2, height/2 + 20);
     ctx.stroke();
 
-    // Draw all tracked objects
     state.trackedObjects.forEach(obj => {
         obj.draw(ctx, state.vectorScale);
     });
 }
 
-// Start the App
+// Start
 init();
 
 </script>
