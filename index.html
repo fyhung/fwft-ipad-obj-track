@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Kinematics Vector Lab</title>
+    
+    <!-- Tailwind CSS for rapid UI styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- TensorFlow.js and Coco-SSD -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+
+    <style>
+        body {
+            overscroll-behavior: none;
+            touch-action: none;
+            background-color: #1a1a1a;
+            color: white;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        /* Container ensures video and canvas overlap perfectly */
+        #camera-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            background: #000;
+        }
+
+        video, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        
+        /* Transform video to fix mirroring if using front camera (we default to rear though) */
+        .mirror {
+            transform: scaleX(-1);
+        }
+
+        /* Loading Overlay */
+        #loader {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+        }
+
+        /* Floating UI Panel */
+        #ui-panel {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 90%;
+            max-width: 600px;
+            background: rgba(30, 30, 30, 0.9);
+            backdrop-filter: blur(10px);
+            padding: 1.5rem;
+            border-radius: 1.5rem;
+            border: 1px solid rgba(255,255,255,0.1);
+            z-index: 40;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+        }
+
+        /* Range Slider Styling */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 24px;
+            width: 24px;
+            border-radius: 50%;
+            background: #3b82f6;
+            margin-top: -10px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            background: #4b5563;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Loading Screen -->
+    <div id="loader">
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
+        <h2 class="text-xl font-bold">Initializing Physics Engine...</h2>
+        <p class="text-gray-400 text-sm mt-2" id="status-text">Requesting Camera Access...</p>
+    </div>
+
+    <!-- Main Viewport -->
+    <div id="camera-container">
+        <!-- Playsinline is critical for iOS to not force fullscreen -->
+        <video id="video" playsinline muted autoplay></video>
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <!-- Controls -->
+    <div id="ui-panel">
+        <div class="flex flex-col gap-4">
+            
+            <!-- Stats & Info -->
+            <div class="flex justify-between items-center text-sm font-mono text-gray-300">
+                <span id="fps-counter">FPS: 0</span>
+                <span id="object-count">Tracking: 0</span>
+            </div>
+
+            <!-- Vector Scale Slider -->
+            <div class="w-full">
+                <div class="flex justify-between mb-1">
+                    <label class="text-sm font-semibold text-gray-200">Vector Scale</label>
+                    <span id="scale-value" class="text-sm text-blue-400">x5</span>
+                </div>
+                <input type="range" id="vector-scale" min="1" max="20" value="5" step="0.5">
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="grid grid-cols-2 gap-4 mt-2">
+                <button id="track-btn" class="bg-blue-600 active:bg-blue-700 text-white font-bold py-4 px-4 rounded-xl shadow-lg transition-transform transform active:scale-95 touch-manipulation">
+                    🎯 Track Target
+                </button>
+                <button id="clear-btn" class="bg-red-600 active:bg-red-700 text-white font-bold py-4 px-4 rounded-xl shadow-lg transition-transform transform active:scale-95 touch-manipulation">
+                    ❌ Clear All
+                </button>
+            </div>
+            
+            <p class="text-xs text-center text-gray-500 mt-2">
+                Point at an object (cup, person, phone) and tap Track.
+            </p>
+        </div>
+    </div>
+
+<script>
+/**
+ * APP STATE & CONFIGURATION
+ */
+const CONFIG = {
+    CONFIDENCE_THRESHOLD: 0.55, // Lowered slightly for better lock-on
+    TRACKING_DISTANCE_THRESHOLD: 150, // Max pixels an object can move between frames to be considered "same"
+    SMOOTHING_BUFFER: 8, // Number of frames to average for velocity
+    LOST_TTL: 30, // Frames to keep an object alive if detection misses briefly
+};
+
+const state = {
+    model: null,
+    video: document.getElementById('video'),
+    canvas: document.getElementById('canvas'),
+    ctx: document.getElementById('canvas').getContext('2d'),
+    status: document.getElementById('status-text'),
+    loader: document.getElementById('loader'),
+    
+    // Tracking State
+    trackedObjects: [], // Array of TrackedObject instances
+    nextId: 1,
+    vectorScale: 5,
+    isStreamReady: false,
+    
+    // Performance
+    lastFrameTime: 0,
+    frameCount: 0
+};
+
+/**
+ * CLASS: Tracked Object
+ * Handles physics calculations, smoothing, and state maintenance for a single entity.
+ */
+class TrackedObject {
+    constructor(id, box, label) {
+        this.id = id;
+        this.label = label;
+        this.color = this.generateColor(id);
+        
+        // State
+        this.active = true;
+        this.lostFrames = 0;
+        
+        // Physics
+        // Box format: [x, y, width, height]
+        this.currentBox = box;
+        this.center = this.getCenter(box);
+        
+        // History for smoothing (Circular buffer concept)
+        this.positionHistory = []; 
+        this.velocity = { x: 0, y: 0 };
+    }
+
+    getCenter(box) {
+        return {
+            x: box[0] + box[2] / 2,
+            y: box[1] + box[3] / 2
+        };
+    }
+
+    generateColor(id) {
+        const hue = (id * 137.508) % 360; // Golden angle approx
+        return `hsl(${hue}, 100%, 50%)`;
+    }
+
+    update(newBox) {
+        this.active = true;
+        this.lostFrames = 0;
+        this.currentBox = newBox;
+        const newCenter = this.getCenter(newBox);
+        
+        // Add to history
+        this.positionHistory.push({
+            x: newCenter.x,
+            y: newCenter.y,
+            time: performance.now()
+        });
+
+        // Limit history size
+        if (this.positionHistory.length > CONFIG.SMOOTHING_BUFFER) {
+            this.positionHistory.shift();
+        }
+
+        this.calculateVelocity();
+        this.center = newCenter;
+    }
+
+    markLost() {
+        this.lostFrames++;
+        if (this.lostFrames > CONFIG.LOST_TTL) {
+            this.active = false;
+        }
+    }
+
+    calculateVelocity() {
+        if (this.positionHistory.length < 2) return;
+
+        // Calculate velocity based on the difference between oldest and newest in buffer
+        // This acts as a low-pass filter naturally
+        const newest = this.positionHistory[this.positionHistory.length - 1];
+        const oldest = this.positionHistory[0];
+        
+        const dt = (newest.time - oldest.time) / 1000; // in seconds
+        
+        if (dt === 0) return;
+
+        // Velocity in pixels per second
+        const rawVx = (newest.x - oldest.x) / dt;
+        const rawVy = (newest.y - oldest.y) / dt;
+
+        // Apply simple damping
+        this.velocity.x = rawVx;
+        this.velocity.y = rawVy;
+    }
+
+    draw(ctx, scale) {
+        if (!this.active) return;
+
+        const [x, y, w, h] = this.currentBox;
+        const cx = this.center.x;
+        const cy = this.center.y;
+
+        // 1. Draw Bounding Box
+        ctx.strokeStyle = this.color;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(x, y, w, h);
+
+        // 2. Draw Label
+        ctx.fillStyle = this.color;
+        ctx.font = "bold 16px Arial";
+        ctx.fillText(`#${this.id} ${this.label}`, x, y - 10);
+        
+        // Speed Text
+        const speed = Math.sqrt(this.velocity.x**2 + this.velocity.y**2).toFixed(0);
+        ctx.fillStyle = "white";
+        ctx.fillText(`${speed} px/s`, x, y - 30);
+
+        // 3. Draw Vectors
+        // We scale the velocity to make it visible on screen
+        const vxEnd = cx + (this.velocity.x * scale * 0.1); 
+        const vyEnd = cy + (this.velocity.y * scale * 0.1);
+
+        // X Velocity (Blue)
+        this.drawArrow(ctx, cx, cy, vxEnd, cy, '#3b82f6', 4);
+        
+        // Y Velocity (Red)
+        this.drawArrow(ctx, cx, cy, cx, vyEnd, '#ef4444', 4);
+
+        // Resultant (Green) - Only if moving significantly
+        if (speed > 10) {
+            this.drawArrow(ctx, cx, cy, vxEnd, vyEnd, '#22c55e', 2);
+        }
+    }
+
+    drawArrow(ctx, fromX, fromY, toX, toY, color, width) {
+        const headLength = 15; 
+        const dx = toX - fromX;
+        const dy = toY - fromY;
+        const angle = Math.atan2(dy, dx);
+        
+        // Don't draw if too short
+        if (Math.sqrt(dx*dx + dy*dy) < 5) return;
+
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = width;
+
+        // Line
+        ctx.beginPath();
+        ctx.moveTo(fromX, fromY);
+        ctx.lineTo(toX, toY);
+        ctx.stroke();
+
+        // Head
+        ctx.beginPath();
+        ctx.moveTo(toX, toY);
+        ctx.lineTo(toX - headLength * Math.cos(angle - Math.PI / 6), toY - headLength * Math.sin(angle - Math.PI / 6));
+        ctx.lineTo(toX - headLength * Math.cos(angle + Math.PI / 6), toY - headLength * Math.sin(angle + Math.PI / 6));
+        ctx.lineTo(toX, toY);
+        ctx.fill();
+    }
+}
+
+/**
+ * INITIALIZATION
+ */
+async function init() {
+    try {
+        // 1. Setup Camera
+        await setupCamera();
+        
+        // 2. Load AI
+        state.status.innerText = "Loading Coco-SSD Model...";
+        state.model = await cocoSsd.load();
+        
+        // 3. Start Loop
+        state.loader.classList.add('hidden');
+        state.isStreamReady = true;
+        resizeCanvas();
+        requestAnimationFrame(gameLoop);
+
+    } catch (err) {
+        state.status.innerText = `Error: ${err.message}`;
+        state.status.classList.add('text-red-500');
+        console.error(err);
+    }
+}
+
+async function setupCamera() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+            facingMode: 'environment', // Rear camera preferred
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+        }
+    });
+
+    state.video.srcObject = stream;
+    
+    return new Promise((resolve) => {
+        state.video.onloadedmetadata = () => {
+            resolve(state.video);
+        };
+    });
+}
+
+function resizeCanvas() {
+    // Match canvas internal resolution to video resolution
+    // CSS handles the visual scaling to fullscreen
+    state.canvas.width = state.video.videoWidth;
+    state.canvas.height = state.video.videoHeight;
+}
+
+window.addEventListener('resize', resizeCanvas);
+
+/**
+ * CORE LOGIC LOOP
+ */
+async function gameLoop() {
+    // FPS Calculation
+    const now = performance.now();
+    const fps = 1000 / (now - state.lastFrameTime);
+    state.lastFrameTime = now;
+    if (state.frameCount++ % 10 === 0) { // Update text rarely
+        document.getElementById('fps-counter').innerText = `FPS: ${fps.toFixed(0)}`;
+    }
+
+    // 1. Detection
+    if (state.isStreamReady && state.model) {
+        const predictions = await state.model.detect(state.video, undefined, CONFIG.CONFIDENCE_THRESHOLD);
+        
+        // 2. Logic: Update Tracked Objects
+        updateTracking(predictions);
+        
+        // 3. Render
+        render();
+    }
+
+    requestAnimationFrame(gameLoop);
+}
+
+/**
+ * TRACKING ALGORITHM
+ * Associates new predictions with existing objects using Euclidean distance.
+ */
+function updateTracking(predictions) {
+    // Flag all existing as potentially lost first
+    state.trackedObjects.forEach(obj => obj.matchedThisFrame = false);
+
+    // Filter weak predictions
+    const validPredictions = predictions.filter(p => p.score > CONFIG.CONFIDENCE_THRESHOLD);
+
+    // Match predictions to existing objects
+    validPredictions.forEach(pred => {
+        const predCenter = {
+            x: pred.bbox[0] + pred.bbox[2] / 2,
+            y: pred.bbox[1] + pred.bbox[3] / 2
+        };
+
+        // Find closest existing object
+        let closestObj = null;
+        let minDist = Infinity;
+
+        state.trackedObjects.forEach(obj => {
+            if (obj.matchedThisFrame) return; // Already matched
+            
+            const dist = Math.hypot(obj.center.x - predCenter.x, obj.center.y - predCenter.y);
+            
+            if (dist < CONFIG.TRACKING_DISTANCE_THRESHOLD && dist < minDist) {
+                minDist = dist;
+                closestObj = obj;
+            }
+        });
+
+        if (closestObj) {
+            closestObj.update(pred.bbox);
+            closestObj.matchedThisFrame = true;
+        }
+    });
+
+    // Handle unmatched objects
+    state.trackedObjects.forEach((obj, index) => {
+        if (!obj.matchedThisFrame) {
+            obj.markLost();
+        }
+    });
+
+    // Remove dead objects
+    state.trackedObjects = state.trackedObjects.filter(obj => obj.active);
+    
+    // Update UI count
+    document.getElementById('object-count').innerText = `Tracking: ${state.trackedObjects.length}`;
+}
+
+/**
+ * USER INPUT HANDLERS
+ */
+
+// Track Button Logic
+document.getElementById('track-btn').addEventListener('click', async () => {
+    // Get fresh predictions immediately
+    const predictions = await state.model.detect(state.video, undefined, 0.3); // Lower threshold to find object to click
+    
+    if (predictions.length === 0) {
+        alert("No objects detected. Try moving closer or improving lighting.");
+        return;
+    }
+
+    // Find object closest to center of screen
+    const screenCenterX = state.video.videoWidth / 2;
+    const screenCenterY = state.video.videoHeight / 2;
+    
+    let closest = null;
+    let minDist = Infinity;
+
+    predictions.forEach(p => {
+        const cx = p.bbox[0] + p.bbox[2]/2;
+        const cy = p.bbox[1] + p.bbox[3]/2;
+        const dist = Math.hypot(cx - screenCenterX, cy - screenCenterY);
+        
+        // Check if we are already tracking this one (roughly)
+        const alreadyTracking = state.trackedObjects.some(t => 
+            Math.hypot(t.center.x - cx, t.center.y - cy) < CONFIG.TRACKING_DISTANCE_THRESHOLD
+        );
+
+        if (!alreadyTracking && dist < minDist) {
+            minDist = dist;
+            closest = p;
+        }
+    });
+
+    if (closest) {
+        const newObj = new TrackedObject(state.nextId++, closest.bbox, closest.class);
+        state.trackedObjects.push(newObj);
+    } else {
+        // Maybe provide feedback if everything central is already tracked
+        // alert("Object already tracked or nothing in center.");
+    }
+});
+
+// Clear Button
+document.getElementById('clear-btn').addEventListener('click', () => {
+    state.trackedObjects = [];
+});
+
+// Scale Slider
+const scaleInput = document.getElementById('vector-scale');
+const scaleDisplay = document.getElementById('scale-value');
+
+scaleInput.addEventListener('input', (e) => {
+    state.vectorScale = parseFloat(e.target.value);
+    scaleDisplay.innerText = `x${state.vectorScale}`;
+});
+
+
+/**
+ * RENDERER
+ */
+function render() {
+    const ctx = state.ctx;
+    const width = state.canvas.width;
+    const height = state.canvas.height;
+
+    // Clear Canvas
+    ctx.clearRect(0, 0, width, height);
+
+    // Optional: Draw center crosshair to help user aim
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(width/2 - 20, height/2);
+    ctx.lineTo(width/2 + 20, height/2);
+    ctx.moveTo(width/2, height/2 - 20);
+    ctx.lineTo(width/2, height/2 + 20);
+    ctx.stroke();
+
+    // Draw all tracked objects
+    state.trackedObjects.forEach(obj => {
+        obj.draw(ctx, state.vectorScale);
+    });
+}
+
+// Start the App
+init();
+
+</script>
+</body>
+</html>
