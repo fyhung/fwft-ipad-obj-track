@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iPad Ultimate Sensor Hub</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .sensor-card {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s ease;
+        }
+        .sensor-card:hover { border-color: rgba(255, 255, 255, 0.2); }
+        .hidden { display: none; }
+        .value-text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen p-4 md:p-8 font-sans">
+
+    <header class="max-w-5xl mx-auto mb-8 flex flex-col md:flex-row md:items-end justify-between gap-4">
+        <div>
+            <h1 class="text-3xl font-black text-white tracking-tight">iPad Sensor Hub</h1>
+            <p class="text-slate-500 text-sm">Hardware Diagnostic Dashboard</p>
+        </div>
+        <div id="promptSection">
+            <button id="requestBtn" class="bg-blue-600 hover:bg-blue-500 active:scale-95 transition-all text-white font-bold py-2 px-6 rounded-lg shadow-lg">
+                Initialize All Sensors
+            </button>
+        </div>
+    </header>
+
+    <main class="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        
+        <!-- Orientation & Compass -->
+        <div class="sensor-card p-5 rounded-2xl">
+            <div class="flex justify-between items-start mb-4">
+                <h2 class="text-blue-400 font-bold uppercase text-xs tracking-widest">Orientation & Compass</h2>
+                <div id="compassVisual" class="w-4 h-4 rounded-full border-2 border-blue-400"></div>
+            </div>
+            <div class="space-y-2 text-sm">
+                <div class="flex justify-between"><span>Heading (North):</span> <span id="heading" class="value-text text-emerald-400">0.00°</span></div>
+                <div class="flex justify-between"><span>Tilt (Forward):</span> <span id="beta" class="value-text text-emerald-400">0.00°</span></div>
+                <div class="flex justify-between"><span>Roll (Side):</span> <span id="gamma" class="value-text text-emerald-400">0.00°</span></div>
+            </div>
+        </div>
+
+        <!-- Geolocation -->
+        <div class="sensor-card p-5 rounded-2xl">
+            <h2 class="text-purple-400 font-bold uppercase text-xs tracking-widest mb-4">GPS / Location</h2>
+            <div class="space-y-2 text-sm">
+                <div class="flex justify-between"><span>Lat:</span> <span id="lat" class="value-text text-emerald-400">Waiting...</span></div>
+                <div class="flex justify-between"><span>Lng:</span> <span id="lng" class="value-text text-emerald-400">Waiting...</span></div>
+                <div class="flex justify-between"><span>Altitude:</span> <span id="alt" class="value-text text-emerald-400">0m</span></div>
+            </div>
+        </div>
+
+        <!-- Battery -->
+        <div class="sensor-card p-5 rounded-2xl">
+            <h2 class="text-orange-400 font-bold uppercase text-xs tracking-widest mb-4">Battery Power</h2>
+            <div class="space-y-2 text-sm">
+                <div class="flex justify-between"><span>Level:</span> <span id="batLevel" class="value-text text-emerald-400">--%</span></div>
+                <div class="flex justify-between"><span>Status:</span> <span id="batStatus" class="value-text text-emerald-400">--</span></div>
+            </div>
+        </div>
+
+        <!-- Ambient / Environment -->
+        <div class="sensor-card p-5 rounded-2xl">
+            <h2 class="text-pink-400 font-bold uppercase text-xs tracking-widest mb-4">Environment</h2>
+            <div class="space-y-2 text-sm">
+                <div class="flex justify-between"><span>Dark Mode:</span> <span id="darkMode" class="value-text text-emerald-400">--</span></div>
+                <div class="flex justify-between"><span>Mic Level:</span> <span id="micVol" class="value-text text-emerald-400">0.00</span></div>
+            </div>
+        </div>
+
+        <!-- Display / Touch -->
+        <div class="sensor-card p-5 rounded-2xl">
+            <h2 class="text-cyan-400 font-bold uppercase text-xs tracking-widest mb-4">Screen & Touch</h2>
+            <div class="space-y-2 text-sm">
+                <div class="flex justify-between"><span>Touch Points:</span> <span id="touchPoints" class="value-text text-emerald-400">0</span></div>
+                <div class="flex justify-between"><span>Pencil Pressure:</span> <span id="pressure" class="value-text text-emerald-400">0.00</span></div>
+            </div>
+        </div>
+
+        <!-- Motion -->
+        <div class="sensor-card p-5 rounded-2xl">
+            <h2 class="text-red-400 font-bold uppercase text-xs tracking-widest mb-4">Accelerometer</h2>
+            <div class="space-y-2 text-sm">
+                <div class="flex justify-between"><span>X-Axis:</span> <span id="accX" class="value-text text-emerald-400">0.00</span></div>
+                <div class="flex justify-between"><span>Y-Axis:</span> <span id="accY" class="value-text text-emerald-400">0.00</span></div>
+                <div class="flex justify-between"><span>Z-Axis:</span> <span id="accZ" class="value-text text-emerald-400">0.00</span></div>
+            </div>
+        </div>
+
+    </main>
+
+    <footer class="max-w-5xl mx-auto mt-8 p-4 bg-slate-900/50 rounded-xl border border-slate-800 text-[10px] text-slate-500 font-mono">
+        Status: <span id="statusLine">Standby</span> | 
+        Protocol: <span id="protoLine">--</span> |
+        Host: <span id="hostLine">--</span>
+    </footer>
+
+    <script>
+        const requestBtn = document.getElementById('requestBtn');
+        const statusLine = document.getElementById('statusLine');
+        
+        // Populate static info
+        document.getElementById('protoLine').innerText = window.location.protocol;
+        document.getElementById('hostLine').innerText = window.location.hostname;
+        document.getElementById('darkMode').innerText = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'ON' : 'OFF';
+
+        async function initSensors() {
+            statusLine.innerText = "Initializing...";
+            
+            // 1. Motion & Orientation (iOS Permission)
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                try {
+                    const res = await DeviceOrientationEvent.requestPermission();
+                    if (res === 'granted') {
+                        setupMotion();
+                    } else {
+                        statusLine.innerText = "Motion Access Denied";
+                    }
+                } catch (e) { console.error(e); }
+            } else {
+                setupMotion();
+            }
+
+            // 2. Battery
+            if ('getBattery' in navigator) {
+                const battery = await navigator.getBattery();
+                const updateBat = () => {
+                    document.getElementById('batLevel').innerText = Math.round(battery.level * 100) + '%';
+                    document.getElementById('batStatus').innerText = battery.charging ? 'Charging' : 'Unplugged';
+                };
+                updateBat();
+                battery.onlevelchange = updateBat;
+                battery.onchargingchange = updateBat;
+            }
+
+            // 3. Geolocation
+            navigator.geolocation.watchPosition((pos) => {
+                document.getElementById('lat').innerText = pos.coords.latitude.toFixed(4);
+                document.getElementById('lng').innerText = pos.coords.longitude.toFixed(4);
+                document.getElementById('alt').innerText = (pos.coords.altitude || 0).toFixed(1) + 'm';
+            }, (err) => {
+                document.getElementById('lat').innerText = "Blocked";
+            }, { enableHighAccuracy: true });
+
+            // 4. Microphone (Decibel Meter)
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const analyser = audioContext.createAnalyser();
+                const microphone = audioContext.createMediaStreamSource(stream);
+                microphone.connect(analyser);
+                analyser.fftSize = 256;
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+
+                function checkVolume() {
+                    analyser.getByteFrequencyData(dataArray);
+                    let sum = 0;
+                    for(let i=0; i<bufferLength; i++) sum += dataArray[i];
+                    document.getElementById('micVol').innerText = (sum / bufferLength).toFixed(2);
+                    requestAnimationFrame(checkVolume);
+                }
+                checkVolume();
+            } catch (e) {
+                document.getElementById('micVol').innerText = "No Access";
+            }
+
+            requestBtn.innerText = "Sensors Online";
+            requestBtn.classList.remove('bg-blue-600');
+            requestBtn.classList.add('bg-emerald-600');
+            statusLine.innerText = "Monitoring Active";
+        }
+
+        function setupMotion() {
+            window.addEventListener('deviceorientation', (e) => {
+                // Check for Webkit Compass Heading
+                const heading = e.webkitCompassHeading || e.alpha;
+                document.getElementById('heading').innerText = (heading || 0).toFixed(2) + '°';
+                document.getElementById('beta').innerText = (e.beta || 0).toFixed(2) + '°';
+                document.getElementById('gamma').innerText = (e.gamma || 0).toFixed(2) + '°';
+                
+                // Visual compass rotate
+                document.getElementById('compassVisual').style.transform = `rotate(${heading}deg)`;
+            });
+
+            window.addEventListener('devicemotion', (e) => {
+                const acc = e.accelerationIncludingGravity;
+                if (acc) {
+                    document.getElementById('accX').innerText = (acc.x || 0).toFixed(2);
+                    document.getElementById('accY').innerText = (acc.y || 0).toFixed(2);
+                    document.getElementById('accZ').innerText = (acc.z || 0).toFixed(2);
+                }
+            });
+        }
+
+        // Touch & Pencil Pressure
+        window.addEventListener('touchstart', (e) => {
+            document.getElementById('touchPoints').innerText = e.touches.length;
+            // Access pressure if available (Apple Pencil)
+            if (e.touches[0].force !== undefined) {
+                document.getElementById('pressure').innerText = e.touches[0].force.toFixed(3);
+            }
+        });
+        window.addEventListener('touchmove', (e) => {
+            if (e.touches[0].force !== undefined) {
+                document.getElementById('pressure').innerText = e.touches[0].force.toFixed(3);
+            }
+        });
+        window.addEventListener('touchend', (e) => {
+            document.getElementById('touchPoints').innerText = e.touches.length;
+            if (e.touches.length === 0) document.getElementById('pressure').innerText = "0.00";
+        });
+
+        requestBtn.addEventListener('click', initSensors);
+    </script>
+</body>
+</html>
